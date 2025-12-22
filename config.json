@@ -10,5 +10,9 @@
   "easy_ease_min_pct": 250,
 
   "very_easy_ivl_min": 90,
-  "very_easy_ease_min_pct": 280
+  "very_easy_ease_min_pct": 280,
+
+  "auto_run_daily": false,
+  "auto_run_search": "",
+  "last_auto_run_ymd": ""
 }

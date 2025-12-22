@@ -23,6 +23,8 @@ from aqt.qt import (
     QSpinBox,
     QLabel,
     QPushButton,
+    QCheckBox,
+    QLineEdit
 )
 from aqt.utils import tooltip, getText
 from anki.collection import Collection
@@ -62,8 +64,16 @@ DEFAULTS: Dict[str, int] = {
 
 def get_cfg() -> Dict[str, Any]:
     cfg = mw.addonManager.getConfig(__name__) or {}
+
+    # existing int defaults
     for k, v in DEFAULTS.items():
         cfg.setdefault(k, v)
+
+    # NEW: auto-run settings (non-int)
+    cfg.setdefault("auto_run_daily", False)
+    cfg.setdefault("auto_run_search", "")
+    cfg.setdefault("last_auto_run_ymd", "")
+
     return cfg
 
 
@@ -72,7 +82,8 @@ def _write_config_keep_unknown(updated: Dict[str, Any]) -> None:
     Keep unknown keys: start from existing config, overwrite known keys only.
     """
     base = mw.addonManager.getConfig(__name__) or {}
-    for k in DEFAULTS.keys():
+    KNOWN = set(DEFAULTS.keys()) | {"auto_run_daily", "auto_run_search", "last_auto_run_ymd"}
+    for k in KNOWN:
         if k in updated:
             base[k] = updated[k]
 
@@ -214,6 +225,24 @@ class ConfigDialog(QDialog):
         hint.setWordWrap(True)
         root.addWidget(hint)
 
+        # --- Auto run (daily) ---
+        box_auto = QGroupBox("Auto run")
+        form_auto = QFormLayout(box_auto)
+        form_auto.setVerticalSpacing(10)
+
+        self.auto_daily = QCheckBox("Run once per day when Anki starts (profile opens)")
+        self.auto_daily.setChecked(bool(cfg.get("auto_run_daily", False)))
+
+        self.auto_search = QLineEdit()
+        self.auto_search.setPlaceholderText('Anki search query (leave empty = all cards)')
+        self.auto_search.setText(str(cfg.get("auto_run_search", "") or ""))
+
+        form_auto.addRow(self.auto_daily)
+        form_auto.addRow("Auto-run search scope", self.auto_search)
+
+        root.addWidget(box_auto)
+
+
         # --- Very Hard ---
         box_vh = QGroupBox("Very Hard")
         form_vh = QFormLayout(box_vh)
@@ -288,6 +317,10 @@ class ConfigDialog(QDialog):
         self.ve_ivl_min.setValue(DEFAULTS["very_easy_ivl_min"])
         self.ve_ease_min.setValue(DEFAULTS["very_easy_ease_min_pct"])
 
+        self.auto_daily.setChecked(False)
+        self.auto_search.setText("")
+
+
     def _save(self) -> None:
         updated = {
             "very_hard_lapses_min": int(self.vh_lapses.value()),
@@ -302,6 +335,9 @@ class ConfigDialog(QDialog):
 
             "very_easy_ivl_min": int(self.ve_ivl_min.value()),
             "very_easy_ease_min_pct": int(self.ve_ease_min.value()),
+
+            "auto_run_daily": bool(self.auto_daily.isChecked()),
+            "auto_run_search": str(self.auto_search.text()).strip(),
         }
 
         _write_config_keep_unknown(updated)
@@ -355,6 +391,37 @@ def set_difficulty_tags():
     ).with_progress(label="Assigning 5-level difficulty tags…").run_in_background()
 
 
+from datetime import date
+
+def _maybe_auto_run_daily() -> None:
+    cfg = get_cfg()
+    if not bool(cfg.get("auto_run_daily", False)):
+        return
+
+    today = date.today().isoformat()
+    last = str(cfg.get("last_auto_run_ymd", "") or "")
+    if last == today:
+        return  # already ran today
+
+    search = str(cfg.get("auto_run_search", "") or "")
+
+    def on_success(processed: int):
+        # 記録を更新（unknownキー保持で保存）
+        _write_config_keep_unknown({"last_auto_run_ymd": today})
+        if processed == 0:
+            tooltip("Daily auto-tag: no cards matched.")
+        else:
+            tooltip(f"Daily auto-tag: tagged {processed} notes.")
+        mw.reset()
+
+    QueryOp(
+        parent=mw,
+        op=lambda col: _assign_difficulty_tags(col, search, cfg),
+        success=on_success,
+    ).with_progress(label="Daily auto-tagging difficulty…").run_in_background()
+
+
+
 def add_menu_button():
     # Keep existing Tools actions (no new Settings item)
     action_assign = QAction("Auto-assign difficulty tags (5 levels)", mw)
@@ -363,5 +430,13 @@ def add_menu_button():
 
 
 # Register GUI + menu actions
+# Register GUI + menu actions
 register_custom_config_gui()
 add_menu_button()
+
+# Auto-run once per day when profile is opened
+try:
+    from aqt import gui_hooks
+    gui_hooks.profile_did_open.append(lambda: _maybe_auto_run_daily())
+except Exception:
+    pass
